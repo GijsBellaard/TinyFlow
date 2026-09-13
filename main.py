@@ -58,13 +58,18 @@ args = p.parse_args()
 
 torch.manual_seed(args.seed)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-net = Model(args.embedding_dim, args.depth, args.heads, args.patch_size).to(device)
+if args.skip_train:
+    ckpt = torch.load(args.ckpt, map_location=device)
+    model_args = ckpt['model_args']
+else:
+    model_args = dict(embedding_dim=args.embedding_dim, depth=args.depth, heads=args.heads, patch_size=args.patch_size)
+net = Model(**model_args).to(device)
 params = list(net.parameters())
 param_count = sum(q.numel() for q in params)
 print(f'{param_count} params')
 
 if args.skip_train:
-    net.load_state_dict(torch.load(args.ckpt, map_location=device))
+    net.load_state_dict(ckpt['model'])
 else:
     X = (MNIST('./data', train=True, download=True).data.float() / 127.5 - 1.0).unsqueeze(1).to(device)
 
@@ -88,18 +93,17 @@ else:
             torch._foreach_lerp_(ema, params, 1 - args.ema)
         if (it + 1) % 1000 == 0:
             print(f'{it+1}/{args.train_steps}  loss {loss.item():.5f}  lr {sched.get_last_lr()[0]:.2e}')
-    print()
 
     with torch.no_grad():
         for q, e in zip(params, ema):
             q.copy_(e / (1 - args.ema ** args.train_steps))
-    torch.save(net.state_dict(), args.ckpt)
+    torch.save({'model_args': model_args, 'model': net.state_dict()}, args.ckpt)
     print(f'wrote {args.ckpt}')
 net.eval()
 
 gif = []
 
-torch.manual_seed(3)
+torch.manual_seed(0)
 x = torch.randn(64, 1, 28, 28, device=device)
 
 dt = 1.0 / args.sample_steps
