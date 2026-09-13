@@ -23,21 +23,18 @@ class Model(nn.Module):
     def __init__(self, embedding_dim, depth, heads, patch_size):
         super().__init__()
         self.patch_size, self.depth, self.g = patch_size, depth, 28 // patch_size
-        self.proj = nn.Linear(patch_size * patch_size, embedding_dim)
+        self.proj = nn.Conv2d(1, embedding_dim, patch_size, stride=patch_size)
         self.pos = nn.Parameter(torch.randn(1, self.g * self.g, embedding_dim) * .02)
         self.block = Block(embedding_dim, heads)
-        self.depth_emb = nn.Parameter(torch.zeros(depth, 1, 1, embedding_dim))
         self.norm = nn.LayerNorm(embedding_dim)
-        self.head = nn.Linear(embedding_dim, patch_size * patch_size)
-        nn.init.zeros_(self.head.weight); nn.init.zeros_(self.head.bias)
     def forward(self, x):
-        k, g, B = self.patch_size, self.g, x.shape[0]
-        h = self.proj(x.view(B, 1, g, k, g, k).permute(0, 2, 4, 3, 5, 1).reshape(B, g * g, k * k))
+        k, g = self.patch_size, self.g
+        h = self.proj(x).flatten(2).transpose(1, 2) # [B, 1, H, W] -> [B, D, g, g] -> [B, D, N] -> [B, N, D]
         h = h + self.pos
         for i in range(self.depth):
-            h = self.block(h + self.depth_emb[i])
-        v = self.head(self.norm(h))
-        return v.view(B, g, g, k, k).permute(0, 1, 3, 2, 4).reshape(B, 1, g * k, g * k)
+            h = self.block(h)
+        v = self.norm(h).transpose(1, 2).unflatten(2, (g, g)).contiguous() # [B, N, D] -> [B, D, N] -> [B, D, g, g] 
+        return F.conv_transpose2d(v, self.proj.weight, stride=k) # [B, D, g, g] -> [B, 1, H, W]
 
 p = argparse.ArgumentParser()
 p.add_argument('--embedding-dim', type=int, default=96)
