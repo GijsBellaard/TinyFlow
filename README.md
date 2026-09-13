@@ -25,7 +25,7 @@ The following command line arguments are available:
 - `--depth`: Number of times the shared transformer block is applied (default: 8)
 - `--heads`: Number of attention heads, must divide `--embedding-dim` (default: 8)
 - `--patch-size`: Patch size, must divide 28 (default: 4)
-- `--train-steps`: Number of training steps (default: 32000)
+- `--train-steps`: Number of training steps (default: 64000)
 - `--batch-size`: Batch size (default: 512)
 - `--lr`: Learning rate (default: 3e-3)
 - `--warmup`: Warmup fraction (default: 0.05)

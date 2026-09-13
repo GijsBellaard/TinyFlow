@@ -41,7 +41,7 @@ p.add_argument('--embedding-dim', type=int, default=96)
 p.add_argument('--depth', type=int, default=8)
 p.add_argument('--heads', type=int, default=8)
 p.add_argument('--patch-size', type=int, default=4)
-p.add_argument('--train-steps', type=int, default=32000)
+p.add_argument('--train-steps', type=int, default=64000)
 p.add_argument('--batch-size', type=int, default=512)
 p.add_argument('--lr', type=float, default=3e-3)
 p.add_argument('--warmup', type=float, default=0.05)
@@ -70,7 +70,8 @@ if args.skip_train:
 else:
     X = (MNIST('./data', train=True, download=True).data.float() / 127.5 - 1.0).unsqueeze(1).to(device)
 
-    ema = [torch.zeros_like(q) for q in params]
+    ema = [torch.zeros_like(q) for q in params] # ema of parameters
+    loss_ema = torch.zeros((), device=device) # ema of loss
     fwd = torch.compile(net, mode='max-autotune') if device == 'cuda' else net
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95), fused=device == 'cuda')
     W = max(1, int(args.warmup * args.train_steps))
@@ -78,7 +79,8 @@ else:
 
     for it in range(args.train_steps):
         x1 = X[torch.randint(0, X.shape[0], (args.batch_size,), device=device)]
-        t = torch.sigmoid(torch.randn(args.batch_size, 1, 1, 1, device=device))
+        u = (torch.arange(args.batch_size, device=device) + torch.rand(1, device=device)) / args.batch_size # even spread to reduce variance
+        t = torch.sigmoid(torch.special.ndtri(u)).view(-1, 1, 1, 1)
         xt = (1 - t) * torch.randn_like(x1) + t * x1
         with torch.autocast(device, torch.bfloat16):
             loss = F.mse_loss(fwd(xt), x1)
@@ -88,19 +90,21 @@ else:
         sched.step()
         with torch.no_grad():
             torch._foreach_lerp_(ema, params, 1 - args.ema)
+            loss_ema.lerp_(loss.float(), 1 - args.ema)
         if (it + 1) % 1000 == 0:
-            print(f'{it+1}/{args.train_steps}  loss {loss.item():.5f}  lr {sched.get_last_lr()[0]:.2e}')
+            loss_avg = loss_ema.item() / (1 - args.ema ** (it + 1)) # ema bias correction
+            print(f'{it+1}/{args.train_steps}  loss {loss_avg:.5f}  lr {sched.get_last_lr()[0]:.2e}')
 
     with torch.no_grad():
         for q, e in zip(params, ema):
-            q.copy_(e / (1 - args.ema ** args.train_steps))
+            q.copy_(e / (1 - args.ema ** args.train_steps)) # ema bias correction
     torch.save({'model_args': model_args, 'model': net.state_dict()}, args.ckpt)
     print(f'wrote {args.ckpt}')
 net.eval()
 
 gif = []
 
-torch.manual_seed(0)
+torch.manual_seed(3)
 x = torch.randn(64, 1, 28, 28, device=device)
 
 dt = 1.0 / args.sample_steps
