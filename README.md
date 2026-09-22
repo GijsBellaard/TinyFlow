@@ -30,29 +30,36 @@ python main.py --skip-train --ckpt model.pt --fid 10000
 ```
 This will download 100MB of Inception-v3 weights.\
 The train set has a FID of 1.76.\
-The included model has a FID of 9.01.\
-This might seem like a big difference, however, the train set plus some noise with σ=0.02 already has a FID of 21.45....
+The included model has a FID of 8.67.\
+This might seem like a big difference, however, the train set plus some noise with σ=0.02 already has a FID of 21.45....\
+Personally, I don't think FID is a good measure of fidelity in this case.
 
 ## Settings
 
 The following command line arguments are available:
-- `--embedding-dim`: Token embedding dimension (default: 96)
-- `--depth`: Number of times the shared transformer block is applied (default: 8)
-- `--heads`: Number of attention heads, must divide `--embedding-dim` (default: 8)
-- `--patch-size`: Patch size, must divide 28 (default: 4)
-- `--train-steps`: Number of training steps (default: 64000)
-- `--batch-size`: Batch size (default: 512)
-- `--lr`: Learning rate (default: 3e-3)
-- `--warmup`: Warmup fraction (default: 0.05)
-- `--ema`: Exponential moving average decay (default: 0.999)
-- `--train-seed`: RNG seed for training (default: 0)
-- `--sampling-steps`: Number of sampling steps (default: 50)
-- `--gif-seed`: RNG seed for the samples shown in the GIF (default: 3)
-- `--gif`: Output GIF filename, no GIF is made unless this is set (default: none)
-- `--ckpt`: Checkpoint filename (default: `model.pt`)
-- `--fid`: Number of samples used to compute FID, 0 disables (default: 0)
-- `--fid-seed`: RNG seed for the samples used to compute FID (default: 0)
-- `--skip-train`: Skip training and only sample from the model (default: False). The model options are read from the checkpoint, so `--embedding-dim`, `--depth`, `--heads` and `--patch-size` are ignored.
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `--embedding-dim` | 96 | Token embedding dimension |
+| `--depth` | 8 | Number of times the shared transformer block is applied |
+| `--heads` | 8 | Number of attention heads, must divide `--embedding-dim` |
+| `--patch-size` | 4 | Patch size |
+| `--patch-stride` | 4 | Patch stride, must divide `28 - patch-size` |
+| `--train-steps` | 64000 | Number of training steps |
+| `--batch-size` | 512 | Batch size |
+| `--lr` | 3e-3 | Learning rate |
+| `--warmup` | 0.05 | Warmup fraction |
+| `--ema` | 0.999 | Exponential moving average decay |
+| `--ckpt` | `model.pt` | Checkpoint filename |
+| `--skip-train` | False | Skip training and only sample from the model |
+| `--sampling-steps` | 50 | Number of sampling steps |
+| `--gif` | none | Output GIF filename, no GIF is made unless this is set |
+| `--fid` | 0 | Number of samples used to compute FID, 0 disables |
+| `--train-seed` | 0 | RNG seed for training |
+| `--gif-seed` | 3 | RNG seed for the samples shown in the GIF |
+| `--fid-seed` | 0 | RNG seed for the samples used to compute FID |
+
+With `--skip-train` the model options are read from the checkpoint, so `--embedding-dim`, `--depth`, `--heads`, `--patch-size` and `--patch-stride` are ignored.
 
 So, for example, you can run:
 ```bash

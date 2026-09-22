@@ -8,10 +8,12 @@ class Block(nn.Module):
     def __init__(self, d, h):
         super().__init__()
         self.h, self.dh = h, d // h
+
         self.n1, self.n2 = nn.LayerNorm(d), nn.LayerNorm(d)
         self.qkv = nn.Linear(d, 3 * d)
         self.o = nn.Linear(d, d)
         self.mlp = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+
     def forward(self, x):
         B, N, D = x.shape
         q, k, v = self.qkv(self.n1(x)).view(B, N, 3, self.h, self.dh).permute(2, 0, 3, 1, 4).unbind(0)
@@ -21,21 +23,25 @@ class Block(nn.Module):
         return x + self.mlp(self.n2(x))
 
 class Model(nn.Module):
-    def __init__(self, embedding_dim, depth, heads, patch_size):
+    def __init__(self, embedding_dim, depth, heads, patch_size, patch_stride):
         super().__init__()
-        self.patch_size, self.depth, self.g = patch_size, depth, 28 // patch_size
-        self.proj = nn.Conv2d(1, embedding_dim, patch_size, stride=patch_size)
+        self.patch_size = patch_size
+        self.patch_stride = patch_stride
+        self.depth = depth
+        self.g = (28 - patch_size) // patch_stride + 1
+
+        self.proj = nn.Conv2d(1, embedding_dim, patch_size, stride=patch_stride)
         self.pos = nn.Parameter(torch.randn(1, self.g * self.g, embedding_dim) * .02)
         self.block = Block(embedding_dim, heads)
         self.norm = nn.LayerNorm(embedding_dim)
+
     def forward(self, x):
-        k, g = self.patch_size, self.g
         h = self.proj(x).flatten(2).transpose(1, 2) # [B, 1, H, W] -> [B, D, g, g] -> [B, D, N] -> [B, N, D]
         h = h + self.pos
         for i in range(self.depth):
             h = self.block(h)
-        v = self.norm(h).transpose(1, 2).unflatten(2, (g, g)).contiguous() # [B, N, D] -> [B, D, N] -> [B, D, g, g] 
-        return F.conv_transpose2d(v, self.proj.weight, stride=k) # [B, D, g, g] -> [B, 1, H, W]
+        v = self.norm(h).transpose(1, 2).unflatten(2, (self.g, self.g)).contiguous() # [B, N, D] -> [B, D, N] -> [B, D, g, g] 
+        return F.conv_transpose2d(v, self.proj.weight, stride=self.patch_stride) # [B, D, g, g] -> [B, 1, H, W]
 
 def train(model, steps, batch_size, lr, warmup, ema_decay):
     device = next(model.parameters()).device
@@ -145,6 +151,7 @@ if __name__ == '__main__':
     p.add_argument('--depth', type=int, default=8)
     p.add_argument('--heads', type=int, default=8)
     p.add_argument('--patch-size', type=int, default=4)
+    p.add_argument('--patch-stride', type=int, default=4)
     p.add_argument('--train-steps', type=int, default=64000)
     p.add_argument('--batch-size', type=int, default=512)
     p.add_argument('--lr', type=float, default=3e-3)
@@ -165,7 +172,13 @@ if __name__ == '__main__':
         ckpt = torch.load(args.ckpt, map_location=device)
         model_args = ckpt['model_args']
     else:
-        model_args = dict(embedding_dim=args.embedding_dim, depth=args.depth, heads=args.heads, patch_size=args.patch_size)
+        model_args = dict(
+            embedding_dim=args.embedding_dim, 
+            depth=args.depth, 
+            heads=args.heads, 
+            patch_size=args.patch_size, 
+            patch_stride=args.patch_stride
+        )
     model = Model(**model_args).to(device)
     param_count = sum(q.numel() for q in model.parameters())
     print(f'{param_count} params')
