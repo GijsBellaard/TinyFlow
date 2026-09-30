@@ -81,7 +81,7 @@ def train(model, steps, batch_size, lr, warmup, ema_decay, class_dropout):
             xt = (1 - t) * x0 + t * x1
             with torch.autocast(device.type, torch.bfloat16):
                 x1_pred = fwd(xt, y)
-                loss = F.mse_loss(x1_pred, x1)
+                loss = (((x1_pred - x1) / (1 - t).clamp(min=0.05)) ** 2).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -190,7 +190,7 @@ if __name__ == '__main__':
     p.add_argument('--class-dropout', type=float, default=0.1)
     p.add_argument('--train-seed', type=int, default=0)
     p.add_argument('--gif-seed', type=int, default=0)
-    p.add_argument('--sampling-steps', type=int, default=10)
+    p.add_argument('--sampling-steps', type=int, default=15)
     p.add_argument('--cfg', type=float, default=1.0)
     p.add_argument('--gif', default=None)
     p.add_argument('--ckpt', default='model.pt')

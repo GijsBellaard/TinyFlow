@@ -30,7 +30,7 @@ python main.py --skip-train --ckpt model.pt --fid 10000
 ```
 This will download 100MB of Inception-v3 weights.\
 The train set has a FID of 1.76.\
-The included model has a FID of 5.75.\
+The included model has a FID of 4.16.\
 This might seem like a big difference, however, the train set plus some noise with σ=0.02 already has a FID of 21.45....\
 Personally, I don't think FID is a good measure of fidelity in this case.
 
@@ -53,7 +53,7 @@ The following command line arguments are available:
 | `--class-dropout` | 0.1 | Fraction of training samples where the class is dropped |
 | `--ckpt` | `model.pt` | Checkpoint filename |
 | `--skip-train` | False | Skip training and only sample from the model |
-| `--sampling-steps` | 10 | Number of sampling steps |
+| `--sampling-steps` | 15 | Number of sampling steps |
 | `--cfg` | 1.0 | Classifier-free guidance scale, 1 is conditioned sampling, 0 is unconditioned  |
 | `--gif` | none | Output GIF filename, no GIF is made unless this is set |
 | `--fid` | 0 | Number of samples used to compute FID, 0 disables |
