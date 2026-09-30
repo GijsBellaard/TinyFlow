@@ -4,6 +4,9 @@ from torchvision.datasets import MNIST
 from torchvision.utils import make_grid
 from PIL import Image
 
+NUM_CLASSES = 10 # digits 0-9
+NULL_CLASS = NUM_CLASSES # extra class index meaning 'no class', used for CFG
+
 class Block(nn.Module):
     def __init__(self, d, h):
         super().__init__()
@@ -16,8 +19,10 @@ class Block(nn.Module):
 
     def forward(self, x):
         B, N, D = x.shape
-        q, k, v = self.qkv(self.n1(x)).view(B, N, 3, self.h, self.dh).permute(2, 0, 3, 1, 4).unbind(0)
-        a = ((q @ k.transpose(-1, -2)) * self.dh ** -.5).softmax(-1) @ v
+        qkv = self.qkv(self.n1(x)).view(B, N, 3, self.h, self.dh) # [B, N, 3, h, dh]
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0) # 3 x [B, h, N, dh]
+        a = (q @ k.transpose(-1, -2)) * self.dh ** -.5 # [B, h, N, N]
+        a = a.softmax(-1) @ v # [B, h, N, dh]
         # a = F.scaled_dot_product_attention(q, k, v)
         x = x + self.o(a.transpose(1, 2).reshape(B, N, D))
         return x + self.mlp(self.n2(x))
@@ -32,20 +37,27 @@ class Model(nn.Module):
 
         self.proj = nn.Conv2d(1, embedding_dim, patch_size, stride=patch_stride)
         self.pos = nn.Parameter(torch.randn(1, self.g * self.g, embedding_dim) * .02)
+        self.cls = nn.Embedding(NUM_CLASSES + 1, embedding_dim) # + 1 for NULL_CLASS
         self.block = Block(embedding_dim, heads)
         self.norm = nn.LayerNorm(embedding_dim)
 
-    def forward(self, x):
-        h = self.proj(x).flatten(2).transpose(1, 2) # [B, 1, H, W] -> [B, D, g, g] -> [B, D, N] -> [B, N, D]
+    def forward(self, x, y):
+        h = self.proj(x) # [B, 1, H, W] -> [B, D, g, g]
+        h = h.flatten(2).transpose(1, 2) # [B, D, g, g] -> [B, N, D]
         h = h + self.pos
+        c = self.cls(y).unsqueeze(1) # [B] -> [B, 1, D]
+        h = torch.cat([c, h], 1) # prepend class token -> [B, 1 + N, D]
         for i in range(self.depth):
             h = self.block(h)
-        v = self.norm(h).transpose(1, 2).unflatten(2, (self.g, self.g)).contiguous() # [B, N, D] -> [B, D, N] -> [B, D, g, g] 
-        return F.conv_transpose2d(v, self.proj.weight, stride=self.patch_stride) # [B, D, g, g] -> [B, 1, H, W]
+        h = self.norm(h[:, 1:]) # drop class token -> [B, N, D]
+        h = h.transpose(1, 2).unflatten(2, (self.g, self.g)).contiguous() # [B, N, D] -> [B, D, g, g]
+        return F.conv_transpose2d(h, self.proj.weight, stride=self.patch_stride) # [B, D, g, g] -> [B, 1, H, W]
 
-def train(model, steps, batch_size, lr, warmup, ema_decay):
+def train(model, steps, batch_size, lr, warmup, ema_decay, class_dropout):
     device = next(model.parameters()).device
-    X = (MNIST('./data', train=True, download=True).data.float() / 127.5 - 1.0).unsqueeze(1).to(device)
+    mnist = MNIST('./data', train=True, download=True)
+    X = (mnist.data.float() / 127.5 - 1.0).unsqueeze(1).to(device)
+    Y = mnist.targets.to(device)
 
     params = list(model.parameters())
     ema = [torch.zeros_like(q) for q in params] # ema of parameters
@@ -58,12 +70,18 @@ def train(model, steps, batch_size, lr, warmup, ema_decay):
     it = 0
     try:
         for it in range(steps):
-            x1 = X[torch.randint(0, X.shape[0], (batch_size,), device=device)]
-            u = (torch.arange(batch_size, device=device) + torch.rand(1, device=device)) / batch_size # even spread to reduce variance
+            idx = torch.randint(0, X.shape[0], (batch_size,), device=device)
+            x1, y = X[idx], Y[idx]
+            drop = torch.rand(batch_size, device=device) < class_dropout # drop class to learn unconditional too
+            y = torch.where(drop, NULL_CLASS, y)
+            u = torch.arange(batch_size, device=device) + torch.rand(1, device=device)
+            u = u / batch_size # even spread over (0, 1) to reduce variance
             t = torch.sigmoid(torch.special.ndtri(u)).view(-1, 1, 1, 1)
-            xt = (1 - t) * torch.randn_like(x1) + t * x1
+            x0 = torch.randn_like(x1)
+            xt = (1 - t) * x0 + t * x1
             with torch.autocast(device.type, torch.bfloat16):
-                loss = F.mse_loss(fwd(xt), x1)
+                x1_pred = fwd(xt, y)
+                loss = F.mse_loss(x1_pred, x1)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -82,19 +100,27 @@ def train(model, steps, batch_size, lr, warmup, ema_decay):
         for q, e in zip(params, ema):
             q.copy_(e / (1 - ema_decay ** steps)) # ema bias correction
 
+def predict(model, xt, y, cfg): # classifier-free guidance
+    xx = torch.cat([xt, xt])
+    yy = torch.cat([y, torch.full_like(y, NULL_CLASS)]) # conditional and unconditional
+    c, u = model(xx, yy).chunk(2)
+    return u + cfg * (c - u)
+
 @torch.no_grad()
-def make_sampling_gif(model, path, steps):
+def make_sampling_gif(model, path, steps, cfg, size=10):
     model.eval()
     gif = []
-    xt = torch.randn(64, 1, 28, 28, device=next(model.parameters()).device)
+    device = next(model.parameters()).device
+    xt = torch.randn(size * size, 1, 28, 28, device=device)
+    y = torch.arange(size * size, device=device) % NUM_CLASSES # class labels 0, 1, ..., 9 arranged
     dt = 1.0 / steps
     for i in range(steps):
         t = i * dt
-        x1 = model(xt)
-        g = make_grid(x1.clamp(-1, 1) * .5 + .5, nrow=8, padding=2)[0]
+        x1 = predict(model, xt, y, cfg)
+        g = make_grid(x1.clamp(-1, 1) * .5 + .5, nrow=size, padding=2)[0]
         gif.append(Image.fromarray((g * 255).byte().cpu().numpy()).quantize(16))
         xt = xt + (x1 - xt) / (1 - t) * dt
-    gif[0].save(path, save_all=True, append_images=gif[1:], loop=0, duration=60)
+    gif[0].save(path, save_all=True, append_images=gif[1:], loop=0, duration=max(1,1200//steps))
     print(f'wrote {path}')
 
 def frechet(f1, f2): # frechet distance between gaussians fitted to two sets of features
@@ -106,21 +132,22 @@ def frechet(f1, f2): # frechet distance between gaussians fitted to two sets of 
     return ((m1 - m2) ** 2).sum() + c1.trace() + c2.trace() - 2 * s
 
 @torch.no_grad()
-def sample(model, n, steps, batch=500):
+def sample(model, n, steps, cfg, batch=500):
     model.eval()
     out = []
     device = next(model.parameters()).device
     dt = 1.0 / steps
     for i in range(0, n, batch):
         xt = torch.randn(min(batch, n - i), 1, 28, 28, device=device)
+        y = torch.randint(0, NUM_CLASSES, (len(xt),), device=device) # random class labels 0, 1, ..., 9
         for j in range(steps):
             t = j * dt
-            x1 = model(xt)
+            x1 = predict(model, xt, y, cfg)
             xt = xt + (x1 - xt) / (1 - t) * dt
         out.append(xt)
     return torch.cat(out)
 
-def calculate_fid(model, n, steps):
+def calculate_fid(model, n, steps, cfg):
     from torchvision.models import inception_v3, Inception_V3_Weights
     device = next(model.parameters()).device
     inc = inception_v3(weights=Inception_V3_Weights.DEFAULT).to(device).eval()
@@ -132,15 +159,18 @@ def calculate_fid(model, n, steps):
     def features(x, batch=250):
         f = []
         for i in range(0, len(x), batch):
-            y = (x[i:i + batch].to(device).clamp(-1, 1) * .5 + .5).expand(-1, 3, -1, -1)
-            f.append(inc((F.interpolate(y, 299, mode='bilinear', align_corners=False) - mean) / std).double())
+            y = x[i:i + batch].to(device).clamp(-1, 1) * .5 + .5 # [-1, 1] -> [0, 1]
+            y = y.expand(-1, 3, -1, -1) # grayscale -> rgb
+            y = F.interpolate(y, 299, mode='bilinear', align_corners=False)
+            f.append(inc((y - mean) / std).double())
         return torch.cat(f)
 
     test = (MNIST('./data', train=False, download=True).data.float() / 127.5 - 1.0).unsqueeze(1)
     train = (MNIST('./data', train=True, download=True).data.float() / 127.5 - 1.0).unsqueeze(1)
+    samples = sample(model, n, steps, cfg)
     test_ft = features(test)
     train_ft = features(train[:n])
-    sampled_ft = features(sample(model, n, steps))
+    sampled_ft = features(samples)
     print(f'fid train {frechet(train_ft, test_ft):.2f}')
     print(f'fid model {frechet(sampled_ft, test_ft):.2f}')
 
@@ -157,9 +187,11 @@ if __name__ == '__main__':
     p.add_argument('--lr', type=float, default=3e-3)
     p.add_argument('--warmup', type=float, default=0.05)
     p.add_argument('--ema', type=float, default=0.999)
+    p.add_argument('--class-dropout', type=float, default=0.1)
     p.add_argument('--train-seed', type=int, default=0)
-    p.add_argument('--gif-seed', type=int, default=3)
-    p.add_argument('--sampling-steps', type=int, default=50)
+    p.add_argument('--gif-seed', type=int, default=0)
+    p.add_argument('--sampling-steps', type=int, default=10)
+    p.add_argument('--cfg', type=float, default=1.0)
     p.add_argument('--gif', default=None)
     p.add_argument('--ckpt', default='model.pt')
     p.add_argument('--skip-train', action='store_true')
@@ -187,14 +219,14 @@ if __name__ == '__main__':
         model.load_state_dict(ckpt['model'])
     else:
         torch.manual_seed(args.train_seed)
-        train(model, args.train_steps, args.batch_size, args.lr, args.warmup, args.ema)
+        train(model, args.train_steps, args.batch_size, args.lr, args.warmup, args.ema, args.class_dropout)
         torch.save({'model_args': model_args, 'model': model.state_dict()}, args.ckpt)
         print(f'wrote {args.ckpt}')
 
     if args.gif:
         torch.manual_seed(args.gif_seed)
-        make_sampling_gif(model, args.gif, args.sampling_steps)
+        make_sampling_gif(model, args.gif, args.sampling_steps, args.cfg)
 
     if args.fid:
         torch.manual_seed(args.fid_seed)
-        calculate_fid(model, args.fid, args.sampling_steps)
+        calculate_fid(model, args.fid, args.sampling_steps, args.cfg)
