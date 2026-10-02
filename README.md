@@ -31,7 +31,7 @@ python main.py --skip-train --ckpt model.pt --fid 10000
 This will download 100MB of Inception-v3 weights.\
 The train set has a FID of 1.76.\
 The included model has a FID of 4.16.\
-This might seem like a big difference, however, the train set plus some noise with σ=0.02 already has a FID of 21.45....\
+This might seem like a big difference, however, the train set plus some noise with σ=0.02 already has a FID of 21.92....\
 Personally, I don't think FID is a good measure of fidelity in this case.
 
 ## Settings

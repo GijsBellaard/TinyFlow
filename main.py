@@ -53,11 +53,20 @@ class Model(nn.Module):
         h = h.transpose(1, 2).unflatten(2, (self.g, self.g)).contiguous() # [B, N, D] -> [B, D, g, g]
         return F.conv_transpose2d(h, self.proj.weight, stride=self.patch_stride) # [B, D, g, g] -> [B, 1, H, W]
 
+def from_uint8(x): # [0, 255] -> [-1, 1]
+    return x.float() / 255 * 2 - 1
+
+def to_uint8(x): # [-1, 1] -> [0, 255]
+    return ((x.clamp(-1, 1) + 1) / 2 * 255).round().byte()
+
+def load_mnist(train): # images [N, 1, 28, 28] in [-1, 1], labels [N]
+    mnist = MNIST('./data', train=train, download=True)
+    return from_uint8(mnist.data).unsqueeze(1), mnist.targets
+
 def train(model, steps, batch_size, lr, warmup, ema_decay, class_dropout):
     device = next(model.parameters()).device
-    mnist = MNIST('./data', train=True, download=True)
-    X = (mnist.data.float() / 127.5 - 1.0).unsqueeze(1).to(device)
-    Y = mnist.targets.to(device)
+    X, Y = load_mnist(train=True)
+    X, Y = X.to(device), Y.to(device)
 
     params = list(model.parameters())
     ema = [torch.zeros_like(q) for q in params] # ema of parameters
@@ -117,8 +126,8 @@ def make_sampling_gif(model, path, steps, cfg, size=10):
     for i in range(steps):
         t = i * dt
         x1 = predict(model, xt, y, cfg)
-        g = make_grid(x1.clamp(-1, 1) * .5 + .5, nrow=size, padding=2)[0]
-        gif.append(Image.fromarray((g * 255).byte().cpu().numpy()).quantize(16))
+        g = make_grid(to_uint8(x1), nrow=size, padding=2)[0]
+        gif.append(Image.fromarray(g.cpu().numpy()).quantize(16))
         xt = xt + (x1 - xt) / (1 - t) * dt
     gif[0].save(path, save_all=True, append_images=gif[1:], loop=0, duration=max(1,1200//steps))
     print(f'wrote {path}')
@@ -150,23 +159,21 @@ def sample(model, n, steps, cfg, batch=500):
 def calculate_fid(model, n, steps, cfg):
     from torchvision.models import inception_v3, Inception_V3_Weights
     device = next(model.parameters()).device
-    inc = inception_v3(weights=Inception_V3_Weights.DEFAULT).to(device).eval()
+    inc = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False).to(device).eval()
     inc.fc = nn.Identity() # [B, 3, 299, 299] -> [B, 2048] pool features
-    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
     @torch.no_grad()
     def features(x, batch=250):
         f = []
         for i in range(0, len(x), batch):
-            y = x[i:i + batch].to(device).clamp(-1, 1) * .5 + .5 # [-1, 1] -> [0, 1]
+            y = from_uint8(to_uint8(x[i:i + batch].to(device))) # quantize to 8 bits like the real data
             y = y.expand(-1, 3, -1, -1) # grayscale -> rgb
-            y = F.interpolate(y, 299, mode='bilinear', align_corners=False)
-            f.append(inc((y - mean) / std).double())
+            y = F.interpolate(y, 299, mode='bilinear', align_corners=False) # Inception-v3's native resolution
+            f.append(inc(y).double())
         return torch.cat(f)
 
-    test = (MNIST('./data', train=False, download=True).data.float() / 127.5 - 1.0).unsqueeze(1)
-    train = (MNIST('./data', train=True, download=True).data.float() / 127.5 - 1.0).unsqueeze(1)
+    test, _ = load_mnist(train=False)
+    train, _ = load_mnist(train=True)
     samples = sample(model, n, steps, cfg)
     test_ft = features(test)
     train_ft = features(train[:n])
@@ -200,6 +207,8 @@ if __name__ == '__main__':
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'device {device}')
+    
     if args.skip_train:
         ckpt = torch.load(args.ckpt, map_location=device)
         model_args = ckpt['model_args']
